@@ -58,7 +58,7 @@ const saveStaticHistory = (hist: HistEntry[]) => lsSet(LS_HIST, hist.map((h) => 
 function Card({ movie, onOpen }: { movie: Movie; onOpen: (m: Movie) => void }) {
   return (
     <button className="card" onClick={() => onOpen(movie)}>
-      <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" />
+      <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" decoding="async" />
       <div className="meta"><b>{movie.title}</b><span>{movie.year} · {movie.genre} · {movie.duration}</span></div>
     </button>
   );
@@ -69,7 +69,7 @@ type ResultMovie = Movie & { editionCount?: number };
 function GridCard({ movie, onOpen }: { movie: ResultMovie; onOpen: (m: Movie) => void }) {
   return (
     <button className="card" style={{ flex: "none", width: "100%" }} onClick={() => onOpen(movie)}>
-      <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" />
+      <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" decoding="async" />
       <div className="meta">
         <b>{movie.title}</b>
         <span>{movie.year} · {movie.duration}</span>
@@ -81,9 +81,15 @@ function GridCard({ movie, onOpen }: { movie: ResultMovie; onOpen: (m: Movie) =>
 
 function Row({ title, movies, onOpen }: { title: string; movies: Movie[]; onOpen: (m: Movie) => void }) {
   if (!movies.length) return null;
+  // Rows are horizontally-scrolled previews, NOT the whole catalog: rendering
+  // every movie (the free-with-ads row alone is ~40k cards with poster
+  // images) explodes DOM/memory and crashes mobile Safari. Cap each row at
+  // the first 40 — the full catalog stays reachable through search, whose
+  // results page keeps its own Load More paging.
+  const shown = movies.slice(0, 40);
   return (<section style={{ padding: "0 4%", marginTop: 28 }}>
     <h2 style={{ fontSize: 20, margin: "0 0 10px" }}>{title}</h2>
-    <div className="row-scroll">{movies.map((m) => <Card key={m.id} movie={m} onOpen={onOpen} />)}</div>
+    <div className="row-scroll">{shown.map((m) => <Card key={m.id} movie={m} onOpen={onOpen} />)}</div>
   </section>);
 }
 
