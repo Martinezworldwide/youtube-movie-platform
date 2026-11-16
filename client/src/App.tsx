@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import type { Movie } from "../../shared/types";
 import { CATEGORIES } from "../../shared/types";
 import { searchMovies, suggestTitles } from "../../shared/search";
+import { STREAMING_SERVICES, findDiscListings } from "./whereToWatch";
 
 // ---- Static catalog data (chunked JSON, NOT bundled into the JS) ----
 // The full catalog is ~25 MB of JSON — far beyond what fits in a JS bundle or
@@ -148,13 +149,18 @@ export default function App() {
     if (!query.trim()) { setResults([]); setShowAll(false); return; }
     if (staticRef.current) {
       // Same scored search as the server — see shared/search.ts. Re-runs as
-      // chunks land (catalogProgress changes) so results grow with the data.
+      // chunks land so results grow with the data. catalogDone and movies
+      // MUST be deps, not just catalogProgress: the completion path calls
+      // setCatalogProgress(null), which is often a null→null no-change under
+      // React batching (no re-render), so a search typed mid-load would
+      // otherwise stay frozen at its partial-catalog result even after the
+      // full catalog arrives.
       setResults(searchMovies(CATALOG, query));
       return;
     }
     const t = setTimeout(() => api(`/search?q=${encodeURIComponent(query)}`).then(setResults).catch(() => {}), 200);
     return () => clearTimeout(t);
-  }, [query, catalogProgress]);
+  }, [query, catalogProgress, catalogDone, movies]);
 
   // New search = fresh results view: back to the first page of results and
   // no filters. (Keyed on query only, so catalog chunks landing mid-search
@@ -190,7 +196,19 @@ export default function App() {
       : `Catalog still loading — searching ${movies.length.toLocaleString()} of ${catalogTotal.toLocaleString()} so far`
     : null;
 
+  // Zero-result honesty: while the static catalog is still loading, an empty
+  // result set means "not fully searched yet", not "not there" — the zero
+  // states show this loading message instead of a definitive "No results".
+  // (Before the manifest/first chunk, catalogTotal is still 0 and
+  // searchCoverage is null, hence the generic fallback.)
+  const zeroStateMessage = staticMode && !catalogDone
+    ? (searchCoverage ?? "Loading the catalog — one moment…")
+    : null;
+
   const hero = useMemo(() => movies.find((m) => m.category === "free-with-ads") ?? movies.find((m) => m.category === "featured") ?? movies[0], [movies]);
+  // "Own it on disc" doors for the open movie (empty for most titles — the
+  // section simply doesn't render then). See client/src/whereToWatch.ts.
+  const selectedDiscs = selected ? findDiscListings(selected) : [];
   const inList = (id: number) => watchlist.some((m) => m.id === id);
 
   const toggleList = async (m: Movie) => {
@@ -246,7 +264,7 @@ export default function App() {
             {results.slice(0, 8).map((m) => <div key={m.id} onClick={() => { openMovie(m); setQuery(""); }} style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14 }}>{m.title} <span style={{ color: "#999" }}>({m.year})</span>{(m.editionCount ?? 0) > 1 && <span style={{ color: "#999" }}> · +{m.editionCount} editions</span>}</div>)}
             <div onClick={() => setShowAll(true)} style={{ padding: "9px 10px", cursor: "pointer", fontSize: 14, background: "#2a2a2a", textAlign: "center" }}>See all results</div>
           </>) : (<>
-            <div style={{ padding: "8px 10px", fontSize: 14, color: "#ccc" }}>No results for “{query.trim()}”</div>
+            <div style={{ padding: "8px 10px", fontSize: 14, color: "#ccc" }}>{zeroStateMessage ?? `No results for “${query.trim()}”`}</div>
             {suggestions.length > 0 && (<div style={{ padding: "0 10px 10px" }}>
               <div style={{ color: "#999", fontSize: 12, marginBottom: 6 }}>Did you mean:</div>
               {suggestions.map((s) => <div key={s} onClick={() => setQuery(s)} style={{ padding: "6px 8px", cursor: "pointer", fontSize: 14, background: "#2a2a2a", borderRadius: 4, marginBottom: 6 }}>{s}</div>)}
@@ -298,7 +316,7 @@ export default function App() {
           <button onClick={() => { setGenreFilter(null); setOfficialOnly(false); setVisibleCount(200); }} style={{ background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4, padding: "8px 12px" }}>Clear filters</button>
         </div>)}
         {results.length === 0 && (<div style={{ marginTop: 16 }}>
-          <p style={{ color: "#ccc" }}>No results for “{query.trim()}”.</p>
+          <p style={{ color: "#ccc" }}>{zeroStateMessage ?? `No results for “${query.trim()}”.`}</p>
           {suggestions.length > 0 && (<>
             <p style={{ color: "#999", fontSize: 13 }}>Did you mean:</p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -330,7 +348,7 @@ export default function App() {
     </main>
 
     {selected && (<div onClick={closeMovie} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: "#181818", borderRadius: 8, maxWidth: 880, width: "100%", overflow: "hidden" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#181818", borderRadius: 8, maxWidth: 880, width: "100%", overflow: "hidden", maxHeight: "92vh", overflowY: "auto" }}>
         <div style={{ aspectRatio: "16/9", background: "#000" }}>
           <iframe title={selected.title} width="100%" height="100%" style={{ border: 0 }}
             src={`https://www.youtube.com/embed/${selected.youtubeId}?autoplay=1&rel=0`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen />
@@ -342,6 +360,28 @@ export default function App() {
           </div>
           <p>{selected.description}</p>
           <button onClick={() => toggleList(selected)} style={{ padding: "8px 16px", border: 0, borderRadius: 4 }}>{inList(selected.id) ? "✓ In My List" : "+ My List"}</button>
+
+          <div style={{ marginTop: 22, borderTop: "1px solid #333", paddingTop: 16 }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: 17 }}>Where to watch</h3>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ background: "#e50914", color: "#fff", padding: "7px 12px", borderRadius: 4, fontSize: 14, fontWeight: 600 }}>▶ Watch free on YouTube</span>
+              <span style={{ color: "#aaa", fontSize: 13 }}>Free with ads — that's the player right above.</span>
+            </div>
+            <p style={{ color: "#aaa", fontSize: 13, margin: "16px 0 8px" }}>Streaming services — lineups change all the time, so search the service to check for this title:</p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {STREAMING_SERVICES.map((s) => (
+                <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer" style={{ background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 999, padding: "6px 12px", fontSize: 13, textDecoration: "none" }}>{s.name}</a>
+              ))}
+            </div>
+            {selectedDiscs.length > 0 && (<>
+              <p style={{ color: "#aaa", fontSize: 13, margin: "16px 0 8px" }}>Own it on disc:</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {selectedDiscs.map((d) => (
+                  <a key={d.url} href={d.url} target="_blank" rel="noopener noreferrer" style={{ background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4, padding: "8px 12px", fontSize: 14, textDecoration: "none" }}>{d.format} · {d.price} · {d.merchant}</a>
+                ))}
+              </div>
+            </>)}
+          </div>
         </div>
       </div>
     </div>)}
