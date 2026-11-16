@@ -20,8 +20,8 @@ const API_BASE = "https://www.googleapis.com/youtube/v3";
  *     those videos report status.embeddable=true and oEmbed 200, so they play in
  *     the in-site player -> category "free-with-ads" (first section).
  *  2. Legit distributor free-movie channels (verified via the API: predominantly
- *     full-length uploads). Their uploads playlists (newest 1500 each) -> genre
- *     categories.
+ *     full-length uploads). Their uploads playlists (per-channel cap; Movie
+ *     Central and Film&Clips are harvested in full) -> genre categories.
  *
  * HARD filters for every candidate: embeddable, >= 60 minutes, title blocklist
  * (trailers/reactions/recaps/commentary/non-English dubs/...), dedupe by videoId
@@ -37,18 +37,18 @@ export const OFFICIAL_FREE_PLAYLISTS: { id: string; title: string }[] = [
   { id: "PLHPTxTxtC0ibVZrT2_WKWUl2SAxsKuKwx", title: "Free to watch" },
 ];
 
-export const DISTRIBUTOR_CHANNELS: { id: string; name: string }[] = [
-  { id: "UCGBzBkV-MinlBvHBzZawfLQ", name: "Movie Central" },
-  { id: "UCNT5YLfnn2cQGIxGw8iOxJQ", name: "Film&Clips" },
-  { id: "UCGADft_i4N1U5nXlfr2424A", name: "Boxoffice | NEW Full Movies in English" },
-  { id: "UCX1nchEcBshItKBeJvH-YMw", name: "FREE MOVIES" },
-  { id: "UCE_0zvmu1pMYZAgqyjW6qsQ", name: "Bigtime - Free Movies" },
-  { id: "UCvRI1Nyvj9pAyHPzX7AviWQ", name: "Family Central" },
-  { id: "UC6slmYIj9veZc_auiX3e5Dg", name: "CREEPY POPCORN" },
-  { id: "UCtkUhM2VZjvoQEhOLmSzaNg", name: "Full Movies in English HD" },
+export const DISTRIBUTOR_CHANNELS: { id: string; name: string; cap: number }[] = [
+  { id: "UCGBzBkV-MinlBvHBzZawfLQ", name: "Movie Central", cap: 3000 },
+  { id: "UCNT5YLfnn2cQGIxGw8iOxJQ", name: "Film&Clips", cap: 17000 },
+  { id: "UCGADft_i4N1U5nXlfr2424A", name: "Boxoffice | NEW Full Movies in English", cap: 1500 },
+  { id: "UCX1nchEcBshItKBeJvH-YMw", name: "FREE MOVIES", cap: 1500 },
+  { id: "UCE_0zvmu1pMYZAgqyjW6qsQ", name: "Bigtime - Free Movies", cap: 1500 },
+  { id: "UCvRI1Nyvj9pAyHPzX7AviWQ", name: "Family Central", cap: 1500 },
+  { id: "UC6slmYIj9veZc_auiX3e5Dg", name: "CREEPY POPCORN", cap: 1500 },
+  { id: "UCtkUhM2VZjvoQEhOLmSzaNg", name: "Full Movies in English HD", cap: 1500 },
 ];
 
-const UPLOADS_PER_CHANNEL = 1500; // newest 1500 uploads per distributor channel (30 playlistItems pages max)
+const UPLOADS_PER_CHANNEL = 1500; // default per-channel uploads cap (channels may override via `cap`)
 const MIN_DURATION_SEC = 3600;
 
 const BLOCK_PATTERNS: RegExp[] = [
@@ -304,13 +304,14 @@ export class YouTubeFetcher {
       } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] official playlist ${pl.id} failed: ${e.message}`); }
     }
 
-    // 2) Distributor channel uploads (newest UPLOADS_PER_CHANNEL each).
+    // 2) Distributor channel uploads (newest `cap` uploads per channel;
+    // Movie Central and Film&Clips caps cover their full uploads lists).
     const distributorKept: RawVideo[] = [];
     for (const ch of DISTRIBUTOR_CHANNELS) {
       try {
         const uploads = await this.uploadsPlaylistId(ch.id);
         if (!uploads) { console.error(`[youtube] channel ${ch.name} (${ch.id}) returned no uploads playlist`); continue; }
-        const ids = await this.playlistVideoIds(uploads, UPLOADS_PER_CHANNEL);
+        const ids = await this.playlistVideoIds(uploads, ch.cap ?? UPLOADS_PER_CHANNEL);
         const raw = await this.videoDetails([...new Set(ids)]);
         distributorKept.push(...this.collect(raw, seenIds, seenTitles, ch.name));
       } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] channel ${ch.name} failed: ${e.message}`); }
