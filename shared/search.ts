@@ -26,6 +26,13 @@
  * - Results are deduped by normalized title: only the best-scored record
  *   per title is returned, with `editionCount` = how many other records
  *   were collapsed into it.
+ * - Search v2.1 (catalog polish): title hits are scored by match QUALITY.
+ *   A token that equals a whole title word ("man" in "Gemini Man") scores
+ *   far above a token that merely prefixes a longer word ("man" in
+ *   "Manu"/"Mantra"/"Mandy"), and the title-starts-with-query bonus only
+ *   fires at a whole-word boundary ("man " in "Man Made", not "man" in
+ *   "Manu"). Before this, single common-word queries surfaced short
+ *   prefix matches ahead of real whole-word titles.
  *
  * Also exports suggestTitles() for "Did you mean" suggestions on zero
  * results. Dependency-free.
@@ -139,22 +146,36 @@ function editionPenalty(rawTitle: string, rawQueryLower: string): number {
 
 const stripLeadingThe = (s: string) => (s.startsWith("the ") ? s.slice(4) : s);
 
+/** How a query token matched a title word: whole word > fuzzy (typo) > prefix. */
+export type TitleMatchKind = "exact" | "fuzzy" | "prefix" | null;
+
 function scoreMovie(
   m: SearchableMovie,
   p: Prepared,
   tokens: string[],
   nq: string,
-  titleHitFlags: boolean[],
+  titleMatchKinds: TitleMatchKind[],
   elsewhereHits: number,
   rawQueryLower: string,
 ): number {
   let score = 0;
   if (p.nTitle === nq) score += 1000;
   else if (stripLeadingThe(p.nTitle) === stripLeadingThe(nq)) score += 900;
-  const titleHits = titleHitFlags.filter(Boolean).length;
-  if (tokens.length && titleHits === tokens.length) score += 300;
-  if (nq && p.nTitle.startsWith(nq)) score += 150;
-  score += titleHits * 40;
+  const titleHits = titleMatchKinds.filter(Boolean).length;
+  const exactHits = titleMatchKinds.filter((k) => k === "exact").length;
+  // All query tokens present in the title: full bonus only when every one
+  // is a whole title word; a title matched only via prefixes/fuzzy gets a
+  // token presence bonus, not the whole-word bonus.
+  if (tokens.length && exactHits === tokens.length) score += 300;
+  else if (tokens.length && titleHits === tokens.length) score += 60;
+  // Title starts with the query: full bonus only at a whole-word boundary
+  // ("man made" for "man"), a small one for a mere string prefix ("manu").
+  if (nq && (p.nTitle === nq || p.nTitle.startsWith(nq + " "))) score += 150;
+  else if (nq && p.nTitle.startsWith(nq)) score += 25;
+  // Per-token quality: whole word >> typo-tolerant fuzzy > bare prefix.
+  score += exactHits * 80;
+  score += titleMatchKinds.filter((k) => k === "fuzzy").length * 30;
+  score += titleMatchKinds.filter((k) => k === "prefix").length * 5;
   score += elsewhereHits * 5; // tokens matched only outside the title
   if (m.channelTitle === "YouTube Movies") score += 60;
   if (m.category === "free-with-ads") score += 40;
@@ -179,16 +200,23 @@ function runPass<T extends SearchableMovie>(
     const p = prepare(m);
     let matched = 0;
     let elsewhereHits = 0;
-    const titleHitFlags: boolean[] = [];
+    const titleMatchKinds: TitleMatchKind[] = [];
     for (const t of tokens) {
-      const inTitle = p.titleWords.some((w) => tokenMatchesWord(t, w));
-      titleHitFlags.push(inTitle);
-      if (inTitle) { matched++; continue; }
+      // Classify the title match by quality: exact whole word first, then
+      // a longer word the token merely prefixes, then a fuzzy (edit-
+      // distance) match. A token counts as a title hit in all three cases;
+      // only the score differs (see scoreMovie).
+      let kind: TitleMatchKind = null;
+      if (p.titleWords.includes(t)) kind = "exact";
+      else if (p.titleWords.some((w) => w.startsWith(t))) kind = "prefix";
+      else if (p.titleWords.some((w) => tokenMatchesWord(t, w))) kind = "fuzzy";
+      titleMatchKinds.push(kind);
+      if (kind) { matched++; continue; }
       if (p.otherWords.some((w) => tokenMatchesWord(t, w))) { matched++; elsewhereHits++; }
       else if (required === tokens.length) return; // strict pass: one miss kills it
     }
     if (matched < required) return;
-    out.push({ m, score: scoreMovie(m, p, tokens, nq, titleHitFlags, elsewhereHits, rawQueryLower), idx, nTitle: p.nTitle });
+    out.push({ m, score: scoreMovie(m, p, tokens, nq, titleMatchKinds, elsewhereHits, rawQueryLower), idx, nTitle: p.nTitle });
   });
   return out;
 }

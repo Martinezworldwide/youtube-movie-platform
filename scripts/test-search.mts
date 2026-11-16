@@ -82,6 +82,14 @@ console.log(`Q: "man" → ${rs.length} results in ${Date.now() - t0}ms`);
 rs.slice(0, 10).forEach((r, i) => console.log(`   ${i + 1}. ${r.title} (${r.year}) [${r.channelTitle ?? "?"}]`));
 const officialInTop10 = rs.slice(0, 10).filter((r) => r.channelTitle === "YouTube Movies").length;
 check("'man' no crash, results returned", rs.length > 0, `${officialInTop10}/10 top results are official-channel`);
+// 8b. Whole-word improvement (search v2.1): at least one top-5 title for
+// "man" must contain "man" as a WHOLE word (e.g. "Gemini Man", "Man Made"),
+// not only prefix matches like "Manu"/"Mantra"/"Mandy" that v2 surfaced.
+const hasWholeWordMan = (t: string) => nt(t).split(" ").includes("man");
+const wholeWordInTop5 = rs.slice(0, 5).filter((r) => hasWholeWordMan(r.title));
+check("'man' top 5 contains a whole-word 'man' title",
+  wholeWordInTop5.length >= 1,
+  `${wholeWordInTop5.length}/5 top results are whole-word: ${wholeWordInTop5.map((r) => r.title).join(", ") || "none"}`);
 
 // 9. Gibberish — zero results, suggestions path survives
 rs = searchMovies(movies, "zzzzqqq");

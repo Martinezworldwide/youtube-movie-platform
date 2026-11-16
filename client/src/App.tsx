@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Movie } from "../../shared/types";
 import { CATEGORIES } from "../../shared/types";
 import { searchMovies, suggestTitles } from "../../shared/search";
@@ -94,6 +94,11 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<ResultMovie[]>([]);
   const [showAll, setShowAll] = useState(false);
+  // Results-page polish: incremental rendering (Load More, +200 at a time)
+  // instead of a hard 200 cap, plus client-side filter chips.
+  const [visibleCount, setVisibleCount] = useState(200);
+  const [genreFilter, setGenreFilter] = useState<string | null>(null);
+  const [officialOnly, setOfficialOnly] = useState(false);
   const [status, setStatus] = useState("");
   const [staticMode, setStaticMode] = useState(false);
   const [catalogProgress, setCatalogProgress] = useState<{ loaded: number; total: number } | null>(null);
@@ -150,6 +155,27 @@ export default function App() {
     const t = setTimeout(() => api(`/search?q=${encodeURIComponent(query)}`).then(setResults).catch(() => {}), 200);
     return () => clearTimeout(t);
   }, [query, catalogProgress]);
+
+  // New search = fresh results view: back to the first page of results and
+  // no filters. (Keyed on query only, so catalog chunks landing mid-search
+  // don't reset a filter the user just picked.)
+  useEffect(() => { setVisibleCount(200); setGenreFilter(null); setOfficialOnly(false); }, [query]);
+
+  // Filter chips, derived from the current (unfiltered) result set.
+  const genreCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of results) if (m.genre) map.set(m.genre, (map.get(m.genre) ?? 0) + 1);
+    return [...map.entries()].sort((a, b) => b[1] - a[1]);
+  }, [results]);
+  const officialCount = useMemo(() => results.filter((m) => m.channelTitle === "YouTube Movies").length, [results]);
+  const filteredResults = useMemo(() => results.filter((m) =>
+    (!genreFilter || m.genre === genreFilter) && (!officialOnly || m.channelTitle === "YouTube Movies")),
+  [results, genreFilter, officialOnly]);
+  const filtersActive = genreFilter !== null || officialOnly;
+  const chipStyle = (active: boolean): CSSProperties => ({
+    background: active ? "#e50914" : "#2a2a2a", color: "#fff", border: "1px solid #444",
+    borderRadius: 999, padding: "6px 12px", fontSize: 13, cursor: "pointer",
+  });
 
   // "Did you mean" candidates — only computed on a zero-result query.
   const suggestions = useMemo(() => {
@@ -250,11 +276,27 @@ export default function App() {
     <main style={{ paddingBottom: 60 }}>
       {showAll && query.trim() ? (<section style={{ padding: "20px 4% 0" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
-          <h2 style={{ fontSize: 22, margin: 0 }}>{results.length.toLocaleString()} result{results.length === 1 ? "" : "s"} for “{query.trim()}”</h2>
+          <h2 style={{ fontSize: 22, margin: 0 }}>{filteredResults.length.toLocaleString()} result{filteredResults.length === 1 ? "" : "s"} for “{query.trim()}”{filtersActive && <span style={{ color: "#aaa", fontSize: 15 }}> (of {results.length.toLocaleString()} unfiltered)</span>}</h2>
           <button onClick={() => { setQuery(""); setShowAll(false); }} style={{ background: "transparent", color: "#9fd3a8", border: "1px solid #555", borderRadius: 4, padding: "6px 12px" }}>← Back to browse</button>
         </div>
         {searchCoverage && <p style={{ color: "#9fd3a8", fontSize: 13, margin: "8px 0 0" }}>{searchCoverage}</p>}
-        {results.length > 200 && <p style={{ color: "#aaa", fontSize: 13, margin: "8px 0 0" }}>Showing first 200 of {results.length.toLocaleString()} results — refine your search to narrow it down.</p>}
+        {results.length > 0 && (<>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
+            <span style={{ color: "#999", fontSize: 13 }}>Genre:</span>
+            <button style={chipStyle(genreFilter === null)} onClick={() => { setGenreFilter(null); setVisibleCount(200); }}>All ({results.length.toLocaleString()})</button>
+            {genreCounts.map(([g, n]) => <button key={g} style={chipStyle(genreFilter === g)} onClick={() => { setGenreFilter(genreFilter === g ? null : g); setVisibleCount(200); }}>{g} ({n.toLocaleString()})</button>)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+            <span style={{ color: "#999", fontSize: 13 }}>Channel:</span>
+            <button style={chipStyle(!officialOnly)} onClick={() => { setOfficialOnly(false); setVisibleCount(200); }}>All channels ({results.length.toLocaleString()})</button>
+            <button style={chipStyle(officialOnly)} onClick={() => { setOfficialOnly(!officialOnly); setVisibleCount(200); }}>YouTube Movies only ({officialCount.toLocaleString()})</button>
+          </div>
+        </>)}
+        {filteredResults.length > 0 && <p style={{ color: "#aaa", fontSize: 13, margin: "10px 0 0" }}>Showing {Math.min(visibleCount, filteredResults.length).toLocaleString()} of {filteredResults.length.toLocaleString()} results{filteredResults.length > visibleCount ? " — use Load More below to keep browsing, or refine your search" : ""}.</p>}
+        {results.length > 0 && filteredResults.length === 0 && (<div style={{ marginTop: 16 }}>
+          <p style={{ color: "#ccc" }}>No results match these filters.</p>
+          <button onClick={() => { setGenreFilter(null); setOfficialOnly(false); setVisibleCount(200); }} style={{ background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4, padding: "8px 12px" }}>Clear filters</button>
+        </div>)}
         {results.length === 0 && (<div style={{ marginTop: 16 }}>
           <p style={{ color: "#ccc" }}>No results for “{query.trim()}”.</p>
           {suggestions.length > 0 && (<>
@@ -265,8 +307,13 @@ export default function App() {
           </>)}
         </div>)}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginTop: 16 }}>
-          {results.slice(0, 200).map((m) => <GridCard key={m.id} movie={m} onOpen={openMovie} />)}
+          {filteredResults.slice(0, visibleCount).map((m) => <GridCard key={m.id} movie={m} onOpen={openMovie} />)}
         </div>
+        {visibleCount < filteredResults.length && (<div style={{ textAlign: "center", marginTop: 20 }}>
+          <button onClick={() => setVisibleCount((c) => c + 200)} style={{ background: "#e50914", color: "#fff", border: 0, padding: "10px 22px", borderRadius: 4, fontSize: 15 }}>
+            Load more results ({(filteredResults.length - visibleCount).toLocaleString()} more)
+          </button>
+        </div>)}
       </section>) : (<>
         {Object.entries(CATEGORIES).map(([slug, label]) => (
           <Row key={slug} title={label} movies={movies.filter((m) => m.category === slug)} onOpen={openMovie} />
