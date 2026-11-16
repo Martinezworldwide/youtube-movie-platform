@@ -1,5 +1,5 @@
 {
-  "count": 47754,
+  "count": 47744,
   "chunks": [
     "catalog-001.json",
     "catalog-002.json",
@@ -10,18 +10,38 @@
     "catalog-007.json",
     "catalog-008.json",
     "catalog-009.json",
-    "catalog-010.json"
+    "catalog-010.json",
+    "catalog-011.json",
+    "catalog-012.json",
+    "catalog-013.json",
+    "catalog-014.json",
+    "catalog-015.json",
+    "catalog-016.json",
+    "catalog-017.json",
+    "catalog-018.json",
+    "catalog-019.json",
+    "catalog-020.json"
   ],
   "chunkCounts": [
-    4743,
-    5037,
-    5285,
-    5223,
-    3319,
-    3827,
-    4991,
-    5148,
-    5209,
-    4972
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    2500,
+    244
   ]
 }
