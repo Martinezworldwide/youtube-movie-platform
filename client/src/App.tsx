@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Movie } from "../../shared/types";
 import { CATEGORIES } from "../../shared/types";
+import { searchMovies } from "../../shared/search";
 import { CATALOG } from "./catalog";
 
 const api = async (path: string, init?: RequestInit) => {
@@ -65,8 +66,8 @@ export default function App() {
   useEffect(() => {
     if (!query.trim()) { setResults([]); return; }
     if (staticRef.current) {
-      const q = query.toLowerCase();
-      setResults(CATALOG.filter((m) => [m.title, m.genre, m.description, String(m.year)].some((f) => f.toLowerCase().includes(q))));
+      // Same tokenized search as the server — see shared/search.ts.
+      setResults(searchMovies(CATALOG, query));
       return;
     }
     const t = setTimeout(() => api(`/search?q=${encodeURIComponent(query)}`).then(setResults).catch(() => {}), 200);

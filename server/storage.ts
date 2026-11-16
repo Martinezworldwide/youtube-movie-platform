@@ -1,4 +1,5 @@
 import type { HistoryItem, Movie, NewMovie, WatchlistItem } from "../shared/types.js";
+import { searchMovies as searchMovieList } from "../shared/search.js";
 
 const thumb = (youtubeId: string) => `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`;
 
@@ -17,9 +18,8 @@ export class MemStorage {
   getMovie(id: number) { return this.movies.get(id); }
   getMoviesByCategory(cat: string) { return this.getMovies().filter((m) => m.category === cat); }
   searchMovies(q: string) {
-    const s = q.toLowerCase();
-    return this.getMovies().filter((m) =>
-      [m.title, m.genre, m.description, String(m.year)].some((f) => f.toLowerCase().includes(s)));
+    // Tokenized search shared with the static client — see shared/search.ts.
+    return searchMovieList(this.getMovies(), q);
   }
   count() { return this.movies.size; }
   clearMovies() { this.movies.clear(); this.nextId = 1; }

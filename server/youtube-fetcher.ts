@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { createHash } from "node:crypto";
 import { CURATED_MOVIES } from "./sample-movies.js";
 import type { MemStorage } from "./storage.js";
 import type { NewMovie } from "../shared/types.js";
@@ -11,11 +14,14 @@ const API_BASE = "https://www.googleapis.com/youtube/v3";
  * no search.list hammering):
  *  1. YouTube's official "Movies & TV" storefront channel (UClgRkhTL3_hImCAmdLfDE4g,
  *     "YouTube Movies", 200M subs). Its "Free to watch" / "Newly Available Free To
- *     Watch Movies" playlists list the free-with-ads storefront movies. Verified
- *     2026-11-16: those videos report status.embeddable=true and oEmbed 200, so
- *     they play in the in-site player -> category "free-with-ads" (first section).
+ *     Watch Movies" playlists list the free-with-ads storefront movies; ALL of the
+ *     channel's playlists are scanned and every /free/i-titled one (minus
+ *     trial/preview/rent/buy/purchase) is harvested in full. Verified 2026-11-16:
+ *     those videos report status.embeddable=true and oEmbed 200, so they play in
+ *     the in-site player -> category "free-with-ads" (first section).
  *  2. Legit distributor free-movie channels (verified via the API: predominantly
- *     full-length uploads). Their uploads playlists -> genre categories.
+ *     full-length uploads). Their uploads playlists (newest 1500 each) -> genre
+ *     categories.
  *
  * HARD filters for every candidate: embeddable, >= 60 minutes, title blocklist
  * (trailers/reactions/recaps/commentary/non-English dubs/...), dedupe by videoId
@@ -42,7 +48,7 @@ export const DISTRIBUTOR_CHANNELS: { id: string; name: string }[] = [
   { id: "UCtkUhM2VZjvoQEhOLmSzaNg", name: "Full Movies in English HD" },
 ];
 
-const UPLOADS_PER_CHANNEL = 100; // 2 playlistItems pages of 50
+const UPLOADS_PER_CHANNEL = 1500; // newest 1500 uploads per distributor channel (30 playlistItems pages max)
 const MIN_DURATION_SEC = 3600;
 
 const BLOCK_PATTERNS: RegExp[] = [
@@ -121,7 +127,14 @@ interface RawVideo {
   embeddable: boolean; thumbnail?: string;
 }
 
-export interface FetchResult { movies: NewMovie[]; apiSuccess: boolean; apiError?: string; callsFailed: number; callsMade: number; }
+export interface SourceStat { name: string; sampled: number; kept: number }
+export interface FetchStats {
+  sampled: number; kept: number;
+  rejectedShort: number; rejectedBlocked: number; rejectedNonEmbeddable: number; rejectedDuplicate: number;
+  sources: SourceStat[];
+  officialPlaylistsMatched: number; officialPlaylistsTotal: number;
+}
+export interface FetchResult { movies: NewMovie[]; apiSuccess: boolean; apiError?: string; callsFailed: number; callsMade: number; cacheHits?: number; stats?: FetchStats; }
 
 interface YouTubeErrorBody { error?: { code?: number; message?: string; errors?: { reason?: string; message?: string }[] } }
 
@@ -135,11 +148,35 @@ export class YouTubeFetcher {
   private key?: string;
   callsMade = 0;
   callsFailed = 0;
+  cacheHits = 0;
+  stats: FetchStats = {
+    sampled: 0, kept: 0, rejectedShort: 0, rejectedBlocked: 0,
+    rejectedNonEmbeddable: 0, rejectedDuplicate: 0, sources: [],
+    officialPlaylistsMatched: 0, officialPlaylistsTotal: 0,
+  };
   constructor(key = process.env.YOUTUBE_API_KEY) { this.key = key?.trim() || undefined; }
   get hasKey() { return !!this.key; }
 
-  private async apiGet(path: string, params: Record<string, string>): Promise<any> {
-    const url = new URL(API_BASE + path);
+  /**
+   * Optional on-disk response cache (dev/iteration aid): when YMP_CACHE_DIR is
+   * set, successful GET responses are stored there keyed by endpoint+params
+   * (API key excluded from the key material and never written to disk), so
+   * re-running a harvest during development costs no extra quota. Inert in
+   * production when the env var is unset.
+   */
+  private cacheFile(endpoint: string, params: Record<string, string>): string | null {
+    const dir = process.env.YMP_CACHE_DIR;
+    if (!dir) return null;
+    const material = endpoint + "?" + Object.entries(params).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join("&");
+    return path.join(dir, createHash("sha256").update(material).digest("hex") + ".json");
+  }
+
+  private async apiGet(endpoint: string, params: Record<string, string>): Promise<any> {
+    const cachePath = this.cacheFile(endpoint, params);
+    if (cachePath && fs.existsSync(cachePath)) {
+      try { this.cacheHits++; return JSON.parse(fs.readFileSync(cachePath, "utf8")); } catch { /* fall through to network */ }
+    }
+    const url = new URL(API_BASE + endpoint);
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
     url.searchParams.set("key", this.key!);
     this.callsMade++;
@@ -150,12 +187,16 @@ export class YouTubeFetcher {
       try { body = await res.json(); } catch { /* non-JSON error body */ }
       const reason = body.error?.errors?.[0]?.reason ?? "unknown";
       const message = body.error?.message ?? res.statusText;
-      console.error(`[youtube] API error status=${res.status} reason=${reason} message="${message}" path=${path}`);
+      console.error(`[youtube] API error status=${res.status} reason=${reason} message="${message}" path=${endpoint}`);
       const err = new Error(`YouTube API ${res.status} ${reason}: ${message}`) as Error & { status?: number; reason?: string };
       err.status = res.status; err.reason = reason;
       throw err;
     }
-    return res.json();
+    const data = await res.json();
+    if (cachePath) {
+      try { fs.mkdirSync(path.dirname(cachePath), { recursive: true }); fs.writeFileSync(cachePath, JSON.stringify(data)); } catch { /* cache is best-effort */ }
+    }
+    return data;
   }
 
   private async playlistVideoIds(playlistId: string, max: number): Promise<string[]> {
@@ -198,20 +239,37 @@ export class YouTubeFetcher {
     return data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? null;
   }
 
-  /** Fetch + filter one raw pool. Returns kept RawVideos (pre-categorization). */
-  private collect(rawPool: RawVideo[], seenIds: Set<string>, seenTitles: Set<string>): RawVideo[] {
+  /** List ALL playlists owned by a channel (paginated, 50/page). */
+  private async listChannelPlaylists(channelId: string): Promise<{ id: string; title: string }[]> {
+    const out: { id: string; title: string }[] = [];
+    let pageToken = "";
+    do {
+      const params: Record<string, string> = { part: "snippet", channelId, maxResults: "50" };
+      if (pageToken) params.pageToken = pageToken;
+      const data = await this.apiGet("/playlists", params);
+      for (const it of data.items ?? []) if (it?.id) out.push({ id: it.id, title: it.snippet?.title ?? "" });
+      pageToken = data.nextPageToken || "";
+    } while (pageToken);
+    return out;
+  }
+
+  /** Fetch + filter one raw pool. Returns kept RawVideos (pre-categorization); records stats. */
+  private collect(rawPool: RawVideo[], seenIds: Set<string>, seenTitles: Set<string>, sourceName: string): RawVideo[] {
     const kept: RawVideo[] = [];
     for (const v of rawPool) {
-      if (!v.embeddable) continue;
-      if (v.durationSec < MIN_DURATION_SEC) continue;
-      if (blockedBy(v.title)) continue;
-      if (seenIds.has(v.videoId)) continue;
+      if (!v.embeddable) { this.stats.rejectedNonEmbeddable++; continue; }
+      if (v.durationSec < MIN_DURATION_SEC) { this.stats.rejectedShort++; continue; }
+      if (blockedBy(v.title)) { this.stats.rejectedBlocked++; continue; }
+      if (seenIds.has(v.videoId)) { this.stats.rejectedDuplicate++; continue; }
       const nt = normTitle(v.title);
-      if (nt && seenTitles.has(nt)) continue;
+      if (nt && seenTitles.has(nt)) { this.stats.rejectedDuplicate++; continue; }
       seenIds.add(v.videoId);
       if (nt) seenTitles.add(nt);
       kept.push(v);
     }
+    this.stats.sampled += rawPool.length;
+    this.stats.kept += kept.length;
+    this.stats.sources.push({ name: sourceName, sampled: rawPool.length, kept: kept.length });
     return kept;
   }
 
@@ -220,27 +278,43 @@ export class YouTubeFetcher {
     const seenTitles = new Set<string>();
     let firstError = "";
 
-    // 1) Official YouTube Movies & TV free-with-ads playlists.
-    const officialRaw: RawVideo[] = [];
-    for (const pl of OFFICIAL_FREE_PLAYLISTS) {
+    // 1) Official YouTube Movies & TV free-with-ads playlists. Beyond the known
+    // five, scan ALL ~1,400 playlists on the storefront channel and take every
+    // title matching /free/i (minus trial/preview/rent/buy/purchase) — genre
+    // free collections etc. Each selected playlist is harvested in FULL.
+    const officialById = new Map<string, { id: string; title: string }>(OFFICIAL_FREE_PLAYLISTS.map((p) => [p.id, p]));
+    try {
+      const allPlaylists = await this.listChannelPlaylists(OFFICIAL_MOVIES_CHANNEL_ID);
+      const matched = allPlaylists.filter((p) => /free/i.test(p.title) && !/trial|preview|rent|buy|purchase/i.test(p.title));
+      this.stats.officialPlaylistsTotal = allPlaylists.length;
+      this.stats.officialPlaylistsMatched = matched.length;
+      for (const p of matched) if (!officialById.has(p.id)) officialById.set(p.id, p);
+      console.log(`[youtube] official channel: ${allPlaylists.length} playlists total, ${matched.length} match /free/i; harvesting ${officialById.size} playlists (incl. ${OFFICIAL_FREE_PLAYLISTS.length} known)`);
+      for (const p of matched) console.log(`[youtube]   official free playlist: "${p.title}" (${p.id})`);
+    } catch (e: any) {
+      if (!firstError) firstError = e.message;
+      console.error(`[youtube] official playlist discovery failed, using known playlists only: ${e.message}`);
+    }
+    const officialKept: RawVideo[] = [];
+    for (const pl of officialById.values()) {
       try {
-        const ids = await this.playlistVideoIds(pl.id, 100);
-        officialRaw.push(...await this.videoDetails([...new Set(ids)]));
+        const ids = await this.playlistVideoIds(pl.id, Number.MAX_SAFE_INTEGER);
+        const raw = await this.videoDetails([...new Set(ids)]);
+        officialKept.push(...this.collect(raw, seenIds, seenTitles, `Official: ${pl.title}`));
       } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] official playlist ${pl.id} failed: ${e.message}`); }
     }
-    const officialKept = this.collect(officialRaw, seenIds, seenTitles);
 
-    // 2) Distributor channel uploads.
-    const distributorRaw: RawVideo[] = [];
+    // 2) Distributor channel uploads (newest UPLOADS_PER_CHANNEL each).
+    const distributorKept: RawVideo[] = [];
     for (const ch of DISTRIBUTOR_CHANNELS) {
       try {
         const uploads = await this.uploadsPlaylistId(ch.id);
         if (!uploads) { console.error(`[youtube] channel ${ch.name} (${ch.id}) returned no uploads playlist`); continue; }
         const ids = await this.playlistVideoIds(uploads, UPLOADS_PER_CHANNEL);
-        distributorRaw.push(...await this.videoDetails([...new Set(ids)]));
+        const raw = await this.videoDetails([...new Set(ids)]);
+        distributorKept.push(...this.collect(raw, seenIds, seenTitles, ch.name));
       } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] channel ${ch.name} failed: ${e.message}`); }
     }
-    const distributorKept = this.collect(distributorRaw, seenIds, seenTitles);
 
     const toMovie = (v: RawVideo, category: string, genreLabel: string): NewMovie => ({
       youtubeId: v.videoId,
@@ -269,7 +343,10 @@ export class YouTubeFetcher {
     }
 
     const apiSuccess = movies.length > 0 && this.callsFailed === 0;
-    return { movies, apiSuccess, apiError: firstError || undefined, callsFailed: this.callsFailed, callsMade: this.callsMade };
+    const s = this.stats;
+    console.log(`[youtube] harvest stats: sampled=${s.sampled} kept=${s.kept} rejected(short=${s.rejectedShort}, blocked=${s.rejectedBlocked}, nonEmbeddable=${s.rejectedNonEmbeddable}, duplicate=${s.rejectedDuplicate}) apiCalls=${this.callsMade} cacheHits=${this.cacheHits} failedCalls=${this.callsFailed}`);
+    for (const src of s.sources) console.log(`[youtube]   ${src.name}: sampled=${src.sampled} kept=${src.kept}`);
+    return { movies, apiSuccess, apiError: firstError || undefined, callsFailed: this.callsFailed, callsMade: this.callsMade, cacheHits: this.cacheHits, stats: s };
   }
 }
 
