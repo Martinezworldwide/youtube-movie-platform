@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { Movie } from "../../shared/types";
 import { CATEGORIES } from "../../shared/types";
-import { searchMovies, suggestTitles } from "../../shared/search";
+import { searchMovies, suggestTitles, OFFICIAL_CHANNELS } from "../../shared/search";
 import { STREAMING_SERVICES, findDiscListings } from "./whereToWatch";
 
 // ---- Static catalog data (chunked JSON, NOT bundled into the JS) ----
@@ -55,11 +55,22 @@ const staticHistory = (): HistEntry[] => lsGet<{ movieId: number; progressSecond
   .map((h) => ({ movie: CATALOG.find((m) => m.id === h.movieId) as Movie, progressSeconds: h.progressSeconds })).filter((h) => h.movie);
 const saveStaticHistory = (hist: HistEntry[]) => lsSet(LS_HIST, hist.map((h) => ({ movieId: h.movie.id, progressSeconds: h.progressSeconds })));
 
+// Playback policy: official storefront titles (OFFICIAL_CHANNELS, verified
+// against the catalog data — only "YouTube Movies") don't reliably play in
+// the embedded player (owner restrictions, age gates, paid editions), so
+// they open on YouTube instead. Everything else plays in-site.
+const isOfficial = (m: Movie) => !!m.channelTitle && OFFICIAL_CHANNELS.has(m.channelTitle);
+const watchUrl = (m: Movie) => `https://www.youtube.com/watch?v=${m.youtubeId}`;
+
+function OfficialBadge() {
+  return <span style={{ display: "inline-block", background: "#e50914", color: "#fff", borderRadius: 3, padding: "1px 7px", fontSize: 11, fontWeight: 600 }}>On YouTube</span>;
+}
+
 function Card({ movie, onOpen }: { movie: Movie; onOpen: (m: Movie) => void }) {
   return (
     <button className="card" onClick={() => onOpen(movie)}>
       <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" decoding="async" />
-      <div className="meta"><b>{movie.title}</b><span>{movie.year} · {movie.genre} · {movie.duration}</span></div>
+      <div className="meta"><b>{movie.title}</b><span>{movie.year} · {movie.genre} · {movie.duration}</span>{isOfficial(movie) && <span style={{ display: "block", marginTop: 4 }}><OfficialBadge /></span>}</div>
     </button>
   );
 }
@@ -74,6 +85,7 @@ function GridCard({ movie, onOpen }: { movie: ResultMovie; onOpen: (m: Movie) =>
         <b>{movie.title}</b>
         <span>{movie.year} · {movie.duration}</span>
         <span>{movie.channelTitle ?? ""}{(movie.editionCount ?? 0) > 1 ? ` · +${movie.editionCount} editions` : ""}</span>
+        {isOfficial(movie) && <span style={{ display: "block", marginTop: 4 }}><OfficialBadge /></span>}
       </div>
     </button>
   );
@@ -179,9 +191,9 @@ export default function App() {
     for (const m of results) if (m.genre) map.set(m.genre, (map.get(m.genre) ?? 0) + 1);
     return [...map.entries()].sort((a, b) => b[1] - a[1]);
   }, [results]);
-  const officialCount = useMemo(() => results.filter((m) => m.channelTitle === "YouTube Movies").length, [results]);
+  const officialCount = useMemo(() => results.filter((m) => isOfficial(m)).length, [results]);
   const filteredResults = useMemo(() => results.filter((m) =>
-    (!genreFilter || m.genre === genreFilter) && (!officialOnly || m.channelTitle === "YouTube Movies")),
+    (!genreFilter || m.genre === genreFilter) && (!officialOnly || isOfficial(m))),
   [results, genreFilter, officialOnly]);
   const filtersActive = genreFilter !== null || officialOnly;
   const chipStyle = (active: boolean): CSSProperties => ({
@@ -267,7 +279,7 @@ export default function App() {
           {searchCoverage && <div style={{ padding: "8px 10px", color: "#9fd3a8", fontSize: 12, borderBottom: "1px solid #333" }}>{searchCoverage}</div>}
           {results.length > 0 ? (<>
             <div style={{ padding: "8px 10px", color: "#999", fontSize: 12, borderBottom: "1px solid #333" }}>{results.length.toLocaleString()} result{results.length === 1 ? "" : "s"}</div>
-            {results.slice(0, 8).map((m) => <div key={m.id} onClick={() => { openMovie(m); setQuery(""); }} style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14 }}>{m.title} <span style={{ color: "#999" }}>({m.year})</span>{(m.editionCount ?? 0) > 1 && <span style={{ color: "#999" }}> · +{m.editionCount} editions</span>}</div>)}
+            {results.slice(0, 8).map((m) => <div key={m.id} onClick={() => { openMovie(m); setQuery(""); }} style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14 }}>{m.title} <span style={{ color: "#999" }}>({m.year})</span>{(m.editionCount ?? 0) > 1 && <span style={{ color: "#999" }}> · +{m.editionCount} editions</span>}{isOfficial(m) && <span style={{ color: "#ff6b6b" }}> · On YouTube</span>}</div>)}
             <div onClick={() => setShowAll(true)} style={{ padding: "9px 10px", cursor: "pointer", fontSize: 14, background: "#2a2a2a", textAlign: "center" }}>See all results</div>
           </>) : (<>
             <div style={{ padding: "8px 10px", fontSize: 14, color: "#ccc" }}>{zeroStateMessage ?? `No results for “${query.trim()}”`}</div>
@@ -288,7 +300,7 @@ export default function App() {
     {hero && !(showAll && query.trim()) && (<section style={{ position: "relative", minHeight: 380, display: "flex", alignItems: "flex-end", padding: "40px 4%", background: `linear-gradient(to top,#141414 5%,transparent 60%), url(${hero.thumbnailUrl}) center/cover` }}>
       <div style={{ maxWidth: 560 }}>
         <h1 style={{ fontSize: 44, margin: "0 0 8px" }}>{hero.title}</h1>
-        <p style={{ color: "#ddd" }}>{hero.year} · {hero.genre} · {hero.duration}</p>
+        <p style={{ color: "#ddd" }}>{hero.year} · {hero.genre} · {hero.duration}{isOfficial(hero) && <> · <OfficialBadge /></>}</p>
         <p>{hero.description}</p>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={() => openMovie(hero)} style={{ padding: "10px 22px", fontSize: 16, border: 0, borderRadius: 4 }}>▶ Play</button>
@@ -356,8 +368,18 @@ export default function App() {
     {selected && (<div onClick={closeMovie} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#181818", borderRadius: 8, maxWidth: 880, width: "100%", overflow: "hidden", maxHeight: "92vh", overflowY: "auto" }}>
         <div style={{ aspectRatio: "16/9", background: "#000" }}>
-          <iframe title={selected.title} width="100%" height="100%" style={{ border: 0 }}
-            src={`https://www.youtube.com/embed/${selected.youtubeId}?autoplay=1&rel=0`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen />
+          {isOfficial(selected) ? (
+            <div style={{ position: "relative", width: "100%", height: "100%" }}>
+              <img src={selected.thumbnailUrl} alt={selected.title} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", opacity: 0.7 }} />
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, background: "rgba(0,0,0,.35)", padding: 16, textAlign: "center" }}>
+                <a href={watchUrl(selected)} target="_blank" rel="noopener noreferrer" style={{ background: "#e50914", color: "#fff", padding: "12px 22px", borderRadius: 4, fontSize: 17, fontWeight: 700, textDecoration: "none" }}>▶ Watch free on YouTube</a>
+                <span style={{ color: "#ddd", fontSize: 13 }}>Free with ads on YouTube — this title doesn't play inside the site.</span>
+              </div>
+            </div>
+          ) : (
+            <iframe title={selected.title} width="100%" height="100%" style={{ border: 0 }}
+              src={`https://www.youtube.com/embed/${selected.youtubeId}?autoplay=1&rel=0`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen />
+          )}
         </div>
         <div style={{ padding: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start" }}>
@@ -370,8 +392,13 @@ export default function App() {
           <div style={{ marginTop: 22, borderTop: "1px solid #333", paddingTop: 16 }}>
             <h3 style={{ margin: "0 0 10px", fontSize: 17 }}>Where to watch</h3>
             <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <span style={{ background: "#e50914", color: "#fff", padding: "7px 12px", borderRadius: 4, fontSize: 14, fontWeight: 600 }}>▶ Watch free on YouTube</span>
-              <span style={{ color: "#aaa", fontSize: 13 }}>Free with ads — that's the player right above.</span>
+              {isOfficial(selected) ? (<>
+                <a href={watchUrl(selected)} target="_blank" rel="noopener noreferrer" style={{ background: "#e50914", color: "#fff", padding: "7px 12px", borderRadius: 4, fontSize: 14, fontWeight: 600, textDecoration: "none" }}>▶ Watch free on YouTube</a>
+                <span style={{ color: "#aaa", fontSize: 13 }}>Free with ads on YouTube — that's the button right above.</span>
+              </>) : (<>
+                <span style={{ background: "#e50914", color: "#fff", padding: "7px 12px", borderRadius: 4, fontSize: 14, fontWeight: 600 }}>▶ Watch free on YouTube</span>
+                <span style={{ color: "#aaa", fontSize: 13 }}>Free with ads — that's the player right above.</span>
+              </>)}
             </div>
             <p style={{ color: "#aaa", fontSize: 13, margin: "16px 0 8px" }}>Streaming services — lineups change all the time, so search the service to check for this title:</p>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

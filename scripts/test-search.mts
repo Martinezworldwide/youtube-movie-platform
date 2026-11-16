@@ -101,5 +101,15 @@ const sugg2 = suggestTitles(movies, "gemeni man");
 console.log(`  suggestions for "gemeni man": ${JSON.stringify(sugg2)}`);
 check("suggestions path doesn't crash", Array.isArray(sugg) && Array.isArray(sugg2));
 
+// 10. Charade — playback policy: when a title has both an official
+// storefront edition and a non-official one, the primary result must be
+// the NON-official edition (it plays in the site's player; the official
+// "Charade" in this catalog is a paid storefront copy).
+rs = searchMovies(movies, "charade");
+show("charade", rs);
+check("Charade primary is the non-official, in-site-playable edition",
+  rs.length > 0 && rs[0].channelTitle !== "YouTube Movies",
+  rs[0] ? `${rs[0].title} (${rs[0].year}) [${rs[0].channelTitle ?? "no channel"}]` : "no results");
+
 console.log(`\n${failures ? `${failures} FAILURE(S)` : "ALL CHECKS PASSED"}`);
 process.exit(failures ? 1 : 0);

@@ -25,7 +25,12 @@
  *   query itself asks for that edition.
  * - Results are deduped by normalized title: only the best-scored record
  *   per title is returned, with `editionCount` = how many other records
- *   were collapsed into it.
+ *   were collapsed into it. One exception (playback policy): when a title
+ *   exists in both official storefront editions (OFFICIAL_CHANNELS — these
+ *   only open on YouTube, and some are paid/rent copies) and non-official
+ *   editions (distributor channels / public-domain classics, which play
+ *   inside the site's player), the best NON-official edition is the one
+ *   displayed; the official ones collapse into its editionCount.
  * - Search v2.1 (catalog polish): title hits are scored by match QUALITY.
  *   A token that equals a whole title word ("man" in "Gemini Man") scores
  *   far above a token that merely prefixes a longer word ("man" in
@@ -48,6 +53,20 @@ export interface SearchableMovie {
 }
 
 export type SearchResult<T> = T & { editionCount: number };
+
+/**
+ * Official storefront channels. Verified against the shipped catalog
+ * chunks (docs/data): "YouTube Movies" is the only storefront channelTitle
+ * present (40,379 of 47,754 records); everything else is a distributor
+ * channel or a curated classic with no channelTitle. Storefront titles
+ * don't reliably play in the site's embedded player (owner restrictions,
+ * age gates, paid editions), so the product policy is: official titles
+ * open on YouTube, everything else plays in-site.
+ */
+export const OFFICIAL_CHANNELS: ReadonlySet<string> = new Set(["YouTube Movies"]);
+
+export const isOfficialChannel = (channelTitle?: string): boolean =>
+  !!channelTitle && OFFICIAL_CHANNELS.has(channelTitle);
 
 export function normalizeSearchText(s: string): string {
   return s
@@ -177,7 +196,7 @@ function scoreMovie(
   score += titleMatchKinds.filter((k) => k === "fuzzy").length * 30;
   score += titleMatchKinds.filter((k) => k === "prefix").length * 5;
   score += elsewhereHits * 5; // tokens matched only outside the title
-  if (m.channelTitle === "YouTube Movies") score += 60;
+  if (isOfficialChannel(m.channelTitle)) score += 60;
   if (m.category === "free-with-ads") score += 40;
   if ((m.durationSeconds ?? 0) >= 5400) score += 10;
   if (m.year) score += Math.min(Math.max(m.year - 1990, 0), 35);
@@ -239,15 +258,28 @@ export function searchMovies<T extends SearchableMovie>(movies: T[], query: stri
 
   scored.sort((a, b) => b.score - a.score || a.idx - b.idx);
 
-  // Dedupe by normalized title: best-scored record wins, count the rest.
+  // Dedupe by normalized title: best-scored record wins, count the rest —
+  // with the playback-policy exception: if a title has any non-official
+  // edition, the best NON-official edition is displayed instead (it plays
+  // in-site; a storefront edition may be a paid copy that outscores it,
+  // e.g. "Charade"). The winner is emitted at the group's best-score
+  // position so result ordering is unchanged.
   const counts = new Map<string, number>();
-  for (const s of scored) counts.set(s.nTitle, (counts.get(s.nTitle) ?? 0) + 1);
+  const winner = new Map<string, Scored<T>>();
+  for (const s of scored) {
+    counts.set(s.nTitle, (counts.get(s.nTitle) ?? 0) + 1);
+    const cur = winner.get(s.nTitle);
+    if (!cur || (isOfficialChannel(cur.m.channelTitle) && !isOfficialChannel(s.m.channelTitle))) {
+      winner.set(s.nTitle, s);
+    }
+  }
   const seen = new Set<string>();
   const results: SearchResult<T>[] = [];
   for (const s of scored) {
     if (seen.has(s.nTitle)) continue;
     seen.add(s.nTitle);
-    results.push({ ...s.m, editionCount: (counts.get(s.nTitle) ?? 1) - 1 });
+    const w = winner.get(s.nTitle)!;
+    results.push({ ...w.m, editionCount: (counts.get(s.nTitle) ?? 1) - 1 });
   }
   return results;
 }
