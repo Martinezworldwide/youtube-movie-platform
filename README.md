@@ -6,10 +6,8 @@ Migrated off Replit (see `AUDIT.md` for the full audit of the original app and w
 **Repository:** https://github.com/Martinezworldwide/youtube-movie-platform
 
 **Live site (GitHub Pages):** https://martinezworldwide.github.io/youtube-movie-platform/
-— **Status: PENDING.** The static build is committed in `/docs` and tested locally, but
-GitHub Pages still needs to be enabled in the repo settings (Settings → Pages →
-Source: Deploy from a branch → `main` / `/docs`). The URL above is not live until that
-step is done. The Pages build runs in static mode: the bundled 21-movie catalog loads
+— **Status: LIVE** (enabled 2026-11-16, verified HTTP 200; source: `main` / `/docs`).
+The Pages build runs in static mode: the bundled 21-movie catalog loads
 without the Express server, and watchlist/history are kept in the browser's localStorage.
 
 ## Run it
