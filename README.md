@@ -7,8 +7,9 @@ Migrated off Replit (see `AUDIT.md` for the full audit of the original app and w
 
 **Live site (GitHub Pages):** https://martinezworldwide.github.io/youtube-movie-platform/
 — **Status: LIVE** (enabled 2026-11-16, verified HTTP 200; source: `main` / `/docs`).
-The Pages build runs in static mode: the bundled 21-movie catalog loads
-without the Express server, and watchlist/history are kept in the browser's localStorage.
+The Pages build runs in static mode: the catalog loads at runtime from chunked
+JSON data files under `docs/data/` (see "Catalog data" below) without the Express
+server, and watchlist/history are kept in the browser's localStorage.
 
 ## Run it
 
@@ -27,11 +28,16 @@ Stop with Ctrl-C. (Dev split mode, optional: `npm run dev` for the API on :5000 
 
 ```bash
 npx vite build --base ./ --outDir docs --emptyOutDir && touch docs/.nojekyll
+node scripts/build-chunks.mjs   # writes docs/data/catalog-*.json + docs/data/index.json
 ```
 
+(vite's root is `client/`, so the build lands in `client/docs/` — move its contents
+into the project `docs/`, keep `docs/.nojekyll`, then run the chunk script.)
+
 The client automatically falls back to static mode when `/api` is unreachable:
-catalog comes from `client/src/catalog.ts` (generated from `server/sample-movies.ts`)
-and watchlist/history use localStorage. No API key is ever used client-side.
+it fetches `data/index.json` (manifest) plus every listed `data/catalog-*.json`
+chunk and concatenates them into the in-memory catalog; watchlist/history use
+localStorage. No API key is ever used client-side.
 
 On startup the server **auto-populates** the curated catalog if the catalog is empty —
 no button click needed. Storage is in-memory (same as the original at runtime), so the
@@ -69,6 +75,25 @@ The original Replit app's key was rejected with 403 on every call. To use a fres
 `GET|POST /api/history`, `POST|PUT /api/history/:movieId/progress`, `DELETE /api/history/:movieId` ·
 `POST /api/populate-movies` · `POST /api/clear-movies`
 Watchlist/history are per-browser-session (cookie), like the original.
+
+## Catalog data
+
+The full catalog (47,754 movies as of 2026-11-16: the complete official
+free-with-ads sweep of the YouTube Movies channel plus distributor free-movie
+channels) is ~25 MB of JSON — too large for a JS bundle or any single
+GitHub-pushable file (the connector hard limit is 16,777,216 bytes/file, and
+large pushes fail well below that). Layout:
+
+- **Canonical export:** a `GET /api/movies` JSON dump (`ymp-movies.json`, kept
+  outside this repo because of its size). `client/src/catalog.ts` is *generated*
+  from that export for local/server use and is likewise not committed at full
+  size.
+- **Canonical committed form:** the chunk set under `docs/data/` —
+  `index.json` manifest (`{count, chunks, chunkCounts}`) + `catalog-001.json`,
+  `catalog-002.json`, … each ≤ ~2.6 MB, split on movie boundaries. Regenerate
+  with `node scripts/build-chunks.mjs [input.json] [outDir]`.
+- The static client loads the manifest + chunks at runtime; the Express server
+  mode is unaffected and still preferred when `/api` is reachable.
 
 ## Catalog note
 
