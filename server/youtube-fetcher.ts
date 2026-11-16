@@ -323,7 +323,7 @@ export class YouTubeFetcher {
       year: extractYear(v),
       genre: genreLabel,
       category,
-      description: v.description.slice(0, 500),
+      description: v.description.slice(0, 200),
       duration: fmtDuration(v.durationSec),
       durationSeconds: v.durationSec,
       rating: "NR",
