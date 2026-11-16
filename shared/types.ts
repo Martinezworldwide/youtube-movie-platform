@@ -21,9 +21,13 @@ export interface HistoryItem {
   watchedAt: string; updatedAt: string;
 }
 export const CATEGORIES: Record<string, string> = {
+  "free-with-ads": "Free with Ads — YouTube Movies & TV",
   "featured": "Featured",
+  "action": "Action",
   "horror-central": "Horror Central",
   "comedy-collection": "Comedy Collection",
-  "film-noir": "Film Noir",
-  "silent-classics": "Silent Classics",
+  "drama": "Drama",
+  "sci-fi": "Sci-Fi",
+  "thriller": "Thriller",
+  "public-domain-classics": "Public Domain Classics",
 };

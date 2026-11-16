@@ -73,7 +73,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [query]);
 
-  const hero = useMemo(() => movies.find((m) => m.category === "featured") ?? movies[0], [movies]);
+  const hero = useMemo(() => movies.find((m) => m.category === "free-with-ads") ?? movies.find((m) => m.category === "featured") ?? movies[0], [movies]);
   const inList = (id: number) => watchlist.some((m) => m.id === id);
 
   const toggleList = async (m: Movie) => {
