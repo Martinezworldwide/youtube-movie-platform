@@ -13,12 +13,16 @@ const API_BASE = "https://www.googleapis.com/youtube/v3";
  * Two sources, both quota-cheap (playlistItems + videos.list = 1 unit/call;
  * no search.list hammering):
  *  1. YouTube's official "Movies & TV" storefront channel (UClgRkhTL3_hImCAmdLfDE4g,
- *     "YouTube Movies", 200M subs). Its "Free to watch" / "Newly Available Free To
- *     Watch Movies" playlists list the free-with-ads storefront movies; ALL of the
- *     channel's playlists are scanned and every /free/i-titled one (minus
- *     trial/preview/rent/buy/purchase) is harvested in full. Verified 2026-11-16:
- *     those videos report status.embeddable=true and oEmbed 200, so they play in
- *     the in-site player -> category "free-with-ads" (first section).
+ *     "YouTube Movies", 200M subs). Storefront movie videos are NOT channel
+ *     uploads (uploads playlist 404s; channel videoCount=0), so the ONLY way to
+ *     enumerate them is the channel's playlists — all ~1,400 of them (388K items,
+ *     heavily duplicated across genre/popularity/deals playlists). FULL SWEEP:
+ *     every playlist is harvested (largest first, network-call budget-capped),
+ *     video IDs deduped globally, and the free-vs-paid split is done by the
+ *     status.embeddable filter — verified 2026-11-16: free-with-ads titles are
+ *     embeddable=true / oEmbed 200, rent/buy titles embeddable=false / oEmbed 401
+ *     (12/12 agreement), so paid listings self-exclude. Kept titles ->
+ *     category "free-with-ads" (first section).
  *  2. Legit distributor free-movie channels (verified via the API: predominantly
  *     full-length uploads). Their uploads playlists (per-channel cap; Movie
  *     Central and Film&Clips are harvested in full) -> genre categories.
@@ -239,15 +243,15 @@ export class YouTubeFetcher {
     return data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads ?? null;
   }
 
-  /** List ALL playlists owned by a channel (paginated, 50/page). */
-  private async listChannelPlaylists(channelId: string): Promise<{ id: string; title: string }[]> {
-    const out: { id: string; title: string }[] = [];
+  /** List ALL playlists owned by a channel (paginated, 50/page), with item counts. */
+  private async listChannelPlaylists(channelId: string): Promise<{ id: string; title: string; itemCount: number }[]> {
+    const out: { id: string; title: string; itemCount: number }[] = [];
     let pageToken = "";
     do {
-      const params: Record<string, string> = { part: "snippet", channelId, maxResults: "50" };
+      const params: Record<string, string> = { part: "snippet,contentDetails", channelId, maxResults: "50" };
       if (pageToken) params.pageToken = pageToken;
       const data = await this.apiGet("/playlists", params);
-      for (const it of data.items ?? []) if (it?.id) out.push({ id: it.id, title: it.snippet?.title ?? "" });
+      for (const it of data.items ?? []) if (it?.id) out.push({ id: it.id, title: it.snippet?.title ?? "", itemCount: it.contentDetails?.itemCount ?? 0 });
       pageToken = data.nextPageToken || "";
     } while (pageToken);
     return out;
@@ -278,30 +282,65 @@ export class YouTubeFetcher {
     const seenTitles = new Set<string>();
     let firstError = "";
 
-    // 1) Official YouTube Movies & TV free-with-ads playlists. Beyond the known
-    // five, scan ALL ~1,400 playlists on the storefront channel and take every
-    // title matching /free/i (minus trial/preview/rent/buy/purchase) — genre
-    // free collections etc. Each selected playlist is harvested in FULL.
-    const officialById = new Map<string, { id: string; title: string }>(OFFICIAL_FREE_PLAYLISTS.map((p) => [p.id, p]));
+    // 1) Official YouTube Movies & TV storefront: FULL PLAYLIST SWEEP.
+    // Storefront videos are not channel uploads, so enumerate ALL ~1,400
+    // playlists (largest first), harvest every item, dedupe video IDs globally
+    // (388K items collapse to the unique storefront catalog), fetch details
+    // once, and let the embeddable filter split free (kept) from rent/buy
+    // (self-excluded). A network-call budget caps the sweep: playlists are
+    // processed in itemCount-descending order and the cutoff is logged.
+    const OFFICIAL_CALL_BUDGET = 4200;
+    const officialKept: RawVideo[] = [];
+    const provenance = new Map<string, Set<string>>(); // videoId -> playlist titles
+    const officialUniqueIds: string[] = [];
+    const seenOfficial = new Set<string>();
+    let playlistsSwept = 0;
+    let playlistsTotal = 0;
     try {
       const allPlaylists = await this.listChannelPlaylists(OFFICIAL_MOVIES_CHANNEL_ID);
-      const matched = allPlaylists.filter((p) => /free/i.test(p.title) && !/trial|preview|rent|buy|purchase/i.test(p.title));
-      this.stats.officialPlaylistsTotal = allPlaylists.length;
-      this.stats.officialPlaylistsMatched = matched.length;
-      for (const p of matched) if (!officialById.has(p.id)) officialById.set(p.id, p);
-      console.log(`[youtube] official channel: ${allPlaylists.length} playlists total, ${matched.length} match /free/i; harvesting ${officialById.size} playlists (incl. ${OFFICIAL_FREE_PLAYLISTS.length} known)`);
-      for (const p of matched) console.log(`[youtube]   official free playlist: "${p.title}" (${p.id})`);
+      playlistsTotal = allPlaylists.length;
+      this.stats.officialPlaylistsTotal = playlistsTotal;
+      const sorted = [...allPlaylists].sort((a, b) => b.itemCount - a.itemCount);
+      // Known free playlists first (fast path), then the rest largest-first.
+      const knownIds = new Set(OFFICIAL_FREE_PLAYLISTS.map((p) => p.id));
+      const ordered = [
+        ...sorted.filter((p) => knownIds.has(p.id)),
+        ...sorted.filter((p) => !knownIds.has(p.id)),
+      ];
+      console.log(`[youtube] official sweep: ${playlistsTotal} playlists, ${sorted.reduce((s, p) => s + p.itemCount, 0)} items total; budget=${OFFICIAL_CALL_BUDGET} network calls`);
+      for (const pl of ordered) {
+        if (this.callsMade >= OFFICIAL_CALL_BUDGET) {
+          console.log(`[youtube] official sweep BUDGET CUTOFF at ${playlistsSwept}/${playlistsTotal} playlists (${officialUniqueIds.length} unique videos so far, ${this.callsMade} calls)`);
+          break;
+        }
+        try {
+          const ids = await this.playlistVideoIds(pl.id, Number.MAX_SAFE_INTEGER);
+          playlistsSwept++;
+          for (const id of ids) {
+            if (!provenance.has(id)) provenance.set(id, new Set());
+            provenance.get(id)!.add(pl.title);
+            if (!seenOfficial.has(id)) { seenOfficial.add(id); officialUniqueIds.push(id); }
+          }
+        } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] official playlist ${pl.id} ("${pl.title}") failed: ${e.message}`); }
+      }
+      this.stats.officialPlaylistsMatched = playlistsSwept;
+      console.log(`[youtube] official sweep done: ${playlistsSwept}/${playlistsTotal} playlists, ${officialUniqueIds.length} unique videos, ${this.callsMade} network calls, ${this.cacheHits} cache hits`);
+      // Details in resilient chunks: a late failure (e.g. quota) keeps earlier chunks.
+      const raw: RawVideo[] = [];
+      for (let i = 0; i < officialUniqueIds.length; i += 2000) {
+        try { raw.push(...await this.videoDetails(officialUniqueIds.slice(i, i + 2000))); }
+        catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] official videoDetails chunk at ${i} failed, keeping ${raw.length} detailed so far: ${e.message}`); break; }
+      }
+      // Acceptance diagnostics: Gemini Man must survive (proven free + embeddable).
+      for (const gid of ["SHoh9cb9fT8", "JUWWDCpSmEk"]) {
+        const inPlaylists = provenance.has(gid) ? [...provenance.get(gid)!] : null;
+        const rv = raw.find((v) => v.videoId === gid);
+        console.log(`[youtube] Gemini check ${gid}: inPlaylists=${inPlaylists ? JSON.stringify(inPlaylists) : "NO"} details=${rv ? `embeddable=${rv.embeddable} durationSec=${rv.durationSec} title="${rv.title}"` : "not returned by videos.list"}`);
+      }
+      officialKept.push(...this.collect(raw, seenIds, seenTitles, "Official: YouTube Movies (full playlist sweep)"));
     } catch (e: any) {
       if (!firstError) firstError = e.message;
-      console.error(`[youtube] official playlist discovery failed, using known playlists only: ${e.message}`);
-    }
-    const officialKept: RawVideo[] = [];
-    for (const pl of officialById.values()) {
-      try {
-        const ids = await this.playlistVideoIds(pl.id, Number.MAX_SAFE_INTEGER);
-        const raw = await this.videoDetails([...new Set(ids)]);
-        officialKept.push(...this.collect(raw, seenIds, seenTitles, `Official: ${pl.title}`));
-      } catch (e: any) { if (!firstError) firstError = e.message; console.error(`[youtube] official playlist ${pl.id} failed: ${e.message}`); }
+      console.error(`[youtube] official sweep failed: ${e.message}`);
     }
 
     // 2) Distributor channel uploads (newest `cap` uploads per channel;
