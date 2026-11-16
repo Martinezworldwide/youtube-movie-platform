@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Movie } from "../../shared/types";
 import { CATEGORIES } from "../../shared/types";
-import { searchMovies } from "../../shared/search";
+import { searchMovies, suggestTitles } from "../../shared/search";
 
 // ---- Static catalog data (chunked JSON, NOT bundled into the JS) ----
 // The full catalog is ~25 MB of JSON — far beyond what fits in a JS bundle or
@@ -12,22 +12,25 @@ import { searchMovies } from "../../shared/search";
 // site never imports it.
 let CATALOG: Movie[] = [];
 type CatalogManifest = { count: number; chunks: string[] };
-let catalogLoadPromise: Promise<void> | null = null;
-const loadCatalogChunks = (onProgress: (loaded: number, total: number) => void): Promise<void> => {
+let catalogLoadPromise: Promise<{ complete: boolean }> | null = null;
+// Chunks load IN PARALLEL (v1 loaded them sequentially — 26 MB trickling in
+// meant search silently covered only what had arrived). Each chunk appends
+// its movies to CATALOG and reports progress as it lands; a failed chunk
+// doesn't block the rest, and the caller hears about it via { complete }.
+const loadCatalogChunks = (onProgress: (loaded: number, total: number) => void): Promise<{ complete: boolean }> => {
   if (!catalogLoadPromise) {
     catalogLoadPromise = (async () => {
       const mr = await fetch("data/index.json");
       if (!mr.ok) throw new Error(`catalog manifest: HTTP ${mr.status}`);
       const manifest = (await mr.json()) as CatalogManifest;
-      const all: Movie[] = [];
-      for (const name of manifest.chunks) {
+      const settled = await Promise.allSettled(manifest.chunks.map(async (name) => {
         const r = await fetch(`data/${name}`);
         if (!r.ok) throw new Error(`catalog chunk ${name}: HTTP ${r.status}`);
         const part = (await r.json()) as Movie[];
-        all.push(...part);
-        CATALOG = all;
-        onProgress(all.length, manifest.count);
-      }
+        CATALOG.push(...part);
+        onProgress(CATALOG.length, manifest.count);
+      }));
+      return { complete: settled.every((s) => s.status === "fulfilled") };
     })();
   }
   return catalogLoadPromise;
@@ -60,6 +63,21 @@ function Card({ movie, onOpen }: { movie: Movie; onOpen: (m: Movie) => void }) {
   );
 }
 
+type ResultMovie = Movie & { editionCount?: number };
+
+function GridCard({ movie, onOpen }: { movie: ResultMovie; onOpen: (m: Movie) => void }) {
+  return (
+    <button className="card" style={{ flex: "none", width: "100%" }} onClick={() => onOpen(movie)}>
+      <img src={movie.thumbnailUrl} alt={movie.title} loading="lazy" />
+      <div className="meta">
+        <b>{movie.title}</b>
+        <span>{movie.year} · {movie.duration}</span>
+        <span>{movie.channelTitle ?? ""}{(movie.editionCount ?? 0) > 1 ? ` · +${movie.editionCount} editions` : ""}</span>
+      </div>
+    </button>
+  );
+}
+
 function Row({ title, movies, onOpen }: { title: string; movies: Movie[]; onOpen: (m: Movie) => void }) {
   if (!movies.length) return null;
   return (<section style={{ padding: "0 4%", marginTop: 28 }}>
@@ -74,10 +92,13 @@ export default function App() {
   const [history, setHistory] = useState<HistEntry[]>([]);
   const [selected, setSelected] = useState<Movie | null>(null);
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<Movie[]>([]);
+  const [results, setResults] = useState<ResultMovie[]>([]);
+  const [showAll, setShowAll] = useState(false);
   const [status, setStatus] = useState("");
   const [staticMode, setStaticMode] = useState(false);
   const [catalogProgress, setCatalogProgress] = useState<{ loaded: number; total: number } | null>(null);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogDone, setCatalogDone] = useState(false);
   const [catalogError, setCatalogError] = useState("");
   const staticRef = useRef(false);
   const progressTimer = useRef<number | undefined>(undefined);
@@ -87,14 +108,25 @@ export default function App() {
     staticRef.current = true; setStaticMode(true);
     void (async () => {
       try {
-        await loadCatalogChunks((loaded, total) => setCatalogProgress({ loaded, total }));
+        const { complete } = await loadCatalogChunks((loaded, total) => {
+          setCatalogTotal(total);
+          setCatalogProgress(loaded < total ? { loaded, total } : null);
+          // Refresh the visible catalog per chunk, not only at the end, so
+          // rows and any in-flight search grow as data arrives.
+          setMovies([...CATALOG]);
+        });
         setCatalogProgress(null);
-        setMovies(CATALOG); setWatchlist(staticWatchlist()); setHistory(staticHistory());
+        setMovies([...CATALOG]); setWatchlist(staticWatchlist()); setHistory(staticHistory());
+        if (complete) {
+          setCatalogDone(true);
+        } else {
+          // Honest partial state: show whatever chunks arrived instead of a
+          // blank page, and say plainly that the catalog is incomplete.
+          setCatalogError(`Catalog only partially loaded — ${CATALOG.length.toLocaleString()} movies available. Some catalog data files failed to load; check your connection and reload the page.`);
+        }
       } catch {
-        // Honest partial state: show whatever chunks arrived instead of a
-        // blank page, and say plainly that the catalog is incomplete.
         setCatalogProgress(null);
-        setMovies(CATALOG); setWatchlist(staticWatchlist()); setHistory(staticHistory());
+        setMovies([...CATALOG]); setWatchlist(staticWatchlist()); setHistory(staticHistory());
         setCatalogError(`Catalog only partially loaded — ${CATALOG.length.toLocaleString()} movies available. Some catalog data files failed to load; check your connection and reload the page.`);
       }
     })();
@@ -108,15 +140,29 @@ export default function App() {
   useEffect(() => { loadAll().catch(() => enterStatic()); }, []);
 
   useEffect(() => {
-    if (!query.trim()) { setResults([]); return; }
+    if (!query.trim()) { setResults([]); setShowAll(false); return; }
     if (staticRef.current) {
-      // Same tokenized search as the server — see shared/search.ts.
+      // Same scored search as the server — see shared/search.ts. Re-runs as
+      // chunks land (catalogProgress changes) so results grow with the data.
       setResults(searchMovies(CATALOG, query));
       return;
     }
     const t = setTimeout(() => api(`/search?q=${encodeURIComponent(query)}`).then(setResults).catch(() => {}), 200);
     return () => clearTimeout(t);
-  }, [query]);
+  }, [query, catalogProgress]);
+
+  // "Did you mean" candidates — only computed on a zero-result query.
+  const suggestions = useMemo(() => {
+    if (!query.trim() || results.length > 0) return [] as string[];
+    return suggestTitles(staticRef.current ? CATALOG : movies, query);
+  }, [query, results, movies, catalogProgress]);
+
+  // Honest coverage note for the results UI while the catalog is incomplete.
+  const searchCoverage = staticMode && !catalogDone && catalogTotal > 0
+    ? catalogError
+      ? `Catalog only partially loaded — searching ${movies.length.toLocaleString()} of ${catalogTotal.toLocaleString()} movies`
+      : `Catalog still loading — searching ${movies.length.toLocaleString()} of ${catalogTotal.toLocaleString()} so far`
+    : null;
 
   const hero = useMemo(() => movies.find((m) => m.category === "free-with-ads") ?? movies.find((m) => m.category === "featured") ?? movies[0], [movies]);
   const inList = (id: number) => watchlist.some((m) => m.id === id);
@@ -164,11 +210,22 @@ export default function App() {
   return (<div>
     <header style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", gap: 24, alignItems: "center", padding: "12px 4%", background: "linear-gradient(#000,#141414)" }}>
       <div style={{ color: "#e50914", fontWeight: 900, fontSize: 26, letterSpacing: 1 }}>MOVIES</div>
-      <nav style={{ display: "flex", gap: 16, color: "#ddd", fontSize: 14 }}><span>Home</span><span>Movies</span><span>My List</span></nav>
+      <nav style={{ display: "flex", gap: 16, color: "#ddd", fontSize: 14 }}><span onClick={() => { setQuery(""); setShowAll(false); }} style={{ cursor: "pointer" }}>Home</span><span>Movies</span><span>My List</span></nav>
       <div style={{ marginLeft: "auto", position: "relative" }}>
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search titles…" style={{ background: "#000", border: "1px solid #555", color: "#fff", padding: "8px 10px", width: 240 }} />
-        {results.length > 0 && (<div style={{ position: "absolute", right: 0, top: 40, width: 320, background: "#1f1f1f", border: "1px solid #333", borderRadius: 6, overflow: "hidden" }}>
-          {results.slice(0, 8).map((m) => <div key={m.id} onClick={() => { openMovie(m); setQuery(""); }} style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14 }}>{m.title} <span style={{ color: "#999" }}>({m.year})</span></div>)}
+        <input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && results.length > 0) setShowAll(true); }} placeholder="Search titles…" style={{ background: "#000", border: "1px solid #555", color: "#fff", padding: "8px 10px", width: 240 }} />
+        {query.trim() && !showAll && (<div style={{ position: "absolute", right: 0, top: 40, width: 320, background: "#1f1f1f", border: "1px solid #333", borderRadius: 6, overflow: "hidden" }}>
+          {searchCoverage && <div style={{ padding: "8px 10px", color: "#9fd3a8", fontSize: 12, borderBottom: "1px solid #333" }}>{searchCoverage}</div>}
+          {results.length > 0 ? (<>
+            <div style={{ padding: "8px 10px", color: "#999", fontSize: 12, borderBottom: "1px solid #333" }}>{results.length.toLocaleString()} result{results.length === 1 ? "" : "s"}</div>
+            {results.slice(0, 8).map((m) => <div key={m.id} onClick={() => { openMovie(m); setQuery(""); }} style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14 }}>{m.title} <span style={{ color: "#999" }}>({m.year})</span>{(m.editionCount ?? 0) > 1 && <span style={{ color: "#999" }}> · +{m.editionCount} editions</span>}</div>)}
+            <div onClick={() => setShowAll(true)} style={{ padding: "9px 10px", cursor: "pointer", fontSize: 14, background: "#2a2a2a", textAlign: "center" }}>See all results</div>
+          </>) : (<>
+            <div style={{ padding: "8px 10px", fontSize: 14, color: "#ccc" }}>No results for “{query.trim()}”</div>
+            {suggestions.length > 0 && (<div style={{ padding: "0 10px 10px" }}>
+              <div style={{ color: "#999", fontSize: 12, marginBottom: 6 }}>Did you mean:</div>
+              {suggestions.map((s) => <div key={s} onClick={() => setQuery(s)} style={{ padding: "6px 8px", cursor: "pointer", fontSize: 14, background: "#2a2a2a", borderRadius: 4, marginBottom: 6 }}>{s}</div>)}
+            </div>)}
+          </>)}
         </div>)}
       </div>
       <button onClick={refresh} style={{ background: "#e50914", color: "#fff", border: 0, padding: "8px 14px", borderRadius: 4 }}>Refresh Movies</button>
@@ -178,7 +235,7 @@ export default function App() {
     {catalogError && <div style={{ padding: "6px 4%", color: "#ffb3b3", fontSize: 13 }}>{catalogError}</div>}
     {status && <div style={{ padding: "6px 4%", color: "#ffb3b3", fontSize: 13 }}>{status}</div>}
 
-    {hero && (<section style={{ position: "relative", minHeight: 380, display: "flex", alignItems: "flex-end", padding: "40px 4%", background: `linear-gradient(to top,#141414 5%,transparent 60%), url(${hero.thumbnailUrl}) center/cover` }}>
+    {hero && !(showAll && query.trim()) && (<section style={{ position: "relative", minHeight: 380, display: "flex", alignItems: "flex-end", padding: "40px 4%", background: `linear-gradient(to top,#141414 5%,transparent 60%), url(${hero.thumbnailUrl}) center/cover` }}>
       <div style={{ maxWidth: 560 }}>
         <h1 style={{ fontSize: 44, margin: "0 0 8px" }}>{hero.title}</h1>
         <p style={{ color: "#ddd" }}>{hero.year} · {hero.genre} · {hero.duration}</p>
@@ -191,17 +248,38 @@ export default function App() {
     </section>)}
 
     <main style={{ paddingBottom: 60 }}>
-      {Object.entries(CATEGORIES).map(([slug, label]) => (
-        <Row key={slug} title={label} movies={movies.filter((m) => m.category === slug)} onOpen={openMovie} />
-      ))}
-      {[...new Set(movies.map((m) => m.category))].filter((c) => !(c in CATEGORIES)).map((c) => (
-        <Row key={c} title={c} movies={movies.filter((m) => m.category === c)} onOpen={openMovie} />
-      ))}
-      <Row title="My List" movies={watchlist} onOpen={openMovie} />
-      <Row title="Recently Watched" movies={history.map((h) => h.movie)} onOpen={openMovie} />
-      {!movies.length && (catalogProgress
-        ? <p style={{ padding: "20px 4%", color: "#aaa" }}>Loading catalog… {catalogProgress.loaded.toLocaleString()} / {catalogProgress.total.toLocaleString()} movies</p>
-        : <p style={{ padding: "20px 4%", color: "#aaa" }}>No movies available in this category — server is populating, or click Refresh Movies.</p>)}
+      {showAll && query.trim() ? (<section style={{ padding: "20px 4% 0" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+          <h2 style={{ fontSize: 22, margin: 0 }}>{results.length.toLocaleString()} result{results.length === 1 ? "" : "s"} for “{query.trim()}”</h2>
+          <button onClick={() => { setQuery(""); setShowAll(false); }} style={{ background: "transparent", color: "#9fd3a8", border: "1px solid #555", borderRadius: 4, padding: "6px 12px" }}>← Back to browse</button>
+        </div>
+        {searchCoverage && <p style={{ color: "#9fd3a8", fontSize: 13, margin: "8px 0 0" }}>{searchCoverage}</p>}
+        {results.length > 200 && <p style={{ color: "#aaa", fontSize: 13, margin: "8px 0 0" }}>Showing first 200 of {results.length.toLocaleString()} results — refine your search to narrow it down.</p>}
+        {results.length === 0 && (<div style={{ marginTop: 16 }}>
+          <p style={{ color: "#ccc" }}>No results for “{query.trim()}”.</p>
+          {suggestions.length > 0 && (<>
+            <p style={{ color: "#999", fontSize: 13 }}>Did you mean:</p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {suggestions.map((s) => <button key={s} onClick={() => setQuery(s)} style={{ background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4, padding: "8px 12px" }}>{s}</button>)}
+            </div>
+          </>)}
+        </div>)}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12, marginTop: 16 }}>
+          {results.slice(0, 200).map((m) => <GridCard key={m.id} movie={m} onOpen={openMovie} />)}
+        </div>
+      </section>) : (<>
+        {Object.entries(CATEGORIES).map(([slug, label]) => (
+          <Row key={slug} title={label} movies={movies.filter((m) => m.category === slug)} onOpen={openMovie} />
+        ))}
+        {[...new Set(movies.map((m) => m.category))].filter((c) => !(c in CATEGORIES)).map((c) => (
+          <Row key={c} title={c} movies={movies.filter((m) => m.category === c)} onOpen={openMovie} />
+        ))}
+        <Row title="My List" movies={watchlist} onOpen={openMovie} />
+        <Row title="Recently Watched" movies={history.map((h) => h.movie)} onOpen={openMovie} />
+        {!movies.length && (catalogProgress
+          ? <p style={{ padding: "20px 4%", color: "#aaa" }}>Loading catalog… {catalogProgress.loaded.toLocaleString()} / {catalogProgress.total.toLocaleString()} movies</p>
+          : <p style={{ padding: "20px 4%", color: "#aaa" }}>No movies available in this category — server is populating, or click Refresh Movies.</p>)}
+      </>)}
     </main>
 
     {selected && (<div onClick={closeMovie} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
