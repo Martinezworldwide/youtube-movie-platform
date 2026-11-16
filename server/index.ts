@@ -9,6 +9,17 @@ import { populateMovieDatabase } from "./youtube-fetcher.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
+
+// Minimal .env loader (no dependency): values already in the environment win.
+try {
+  const envPath = path.join(root, ".env");
+  if (fs.existsSync(envPath)) {
+    for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/i);
+      if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    }
+  }
+} catch { /* .env is optional */ }
 const PORT = Number(process.env.PORT || 5000);
 const isProd = process.env.NODE_ENV === "production";
 
